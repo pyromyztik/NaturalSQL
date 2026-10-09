@@ -1,8 +1,9 @@
 import json
 import urllib.request
 import re
+import time
 from typing import Optional, List, Dict
-import config
+from src import config
 
 SYSTEM_PROMPT = """You are NaturalSQL, a deterministic PostgreSQL generation engine.
 Your task is to convert natural language requests into valid, executable PostgreSQL queries strictly conforming to the provided database schema.
@@ -19,40 +20,53 @@ RULES:
 """
 
 class LLMGenerator:
-    def __init__(self, host: str = config.OLLAMA_HOST, model: str = config.OLLAMA_MODEL):
+    def __init__(self, host: str = config.OLLAMA_HOST, model: str = config.OLLAMA_MODEL, timeout: int = None, max_tokens: int = 1024):
         self.host = host.rstrip("/")
         self.model = model
+        self.timeout = timeout if timeout is not None else getattr(config, "OLLAMA_TIMEOUT", 120)
+        self.max_tokens = max_tokens
 
-    def _call_ollama(self, messages: List[Dict[str, str]], timeout: int = 60) -> str:
+    def _call_ollama(self, messages: List[Dict[str, str]], timeout: int = None, retries: int = 2) -> str:
+        if timeout is None:
+            timeout = self.timeout
         url = f"{self.host}/api/chat"
+        options = {
+            "temperature": 0.05,
+            "top_p": 0.9,
+            "num_ctx": 3072  # Optimal context for 100% GPU offload on RTX 4060
+        }
+        if self.max_tokens:
+            options["num_predict"] = self.max_tokens
+
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": 0.05,
-                "top_p": 0.9,
-                "num_ctx": 3072  # Optimal context for 100% GPU offload on RTX 4060
-            }
+            "options": options
         }
         
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                result = json.loads(response.read().decode("utf-8"))
-                msg = result.get("message", {})
-                content = msg.get("content", "").strip()
-                # Fallback: if content is empty but model put output in thinking block
-                if not content and msg.get("thinking"):
-                    content = msg.get("thinking", "").strip()
-                return content
-        except Exception as e:
-            raise RuntimeError(f"Failed to communicate with Ollama at {url}: {e}")
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                    msg = result.get("message", {})
+                    content = msg.get("content", "").strip()
+                    # Fallback: if content is empty but model put output in thinking block
+                    if not content and msg.get("thinking"):
+                        content = msg.get("thinking", "").strip()
+                    return content
+            except Exception as e:
+                last_error = e
+                if attempt < retries:
+                    time.sleep(1.0)
+                    continue
+                raise RuntimeError(f"Failed to communicate with Ollama at {url}: {last_error}")
 
     def extract_sql(self, response_text: str) -> str:
         """Extracts SQL from ```sql ... ``` block or raw text, stripping thoughts."""

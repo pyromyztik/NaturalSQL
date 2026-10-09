@@ -1,7 +1,8 @@
 import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import psycopg2
-import config
+from src import config
 
 def seed_database():
     password = config.PG_PASSWORD or os.environ.get("PGPASSWORD")
@@ -20,7 +21,8 @@ def seed_database():
         )
         print("Connected to PostgreSQL successfully.")
         
-        with open("seed_ecommerce.sql", "r", encoding="utf-8") as f:
+        sql_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed_ecommerce.sql")
+        with open(sql_file, "r", encoding="utf-8") as f:
             sql_script = f.read()
 
         with conn.cursor() as cur:

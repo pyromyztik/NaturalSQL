@@ -5,7 +5,7 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 from rapidfuzz import process, fuzz
 
-from catalog import DatabaseCatalog
+from .catalog import DatabaseCatalog
 
 @dataclass
 class CompilationResult:
@@ -256,9 +256,9 @@ class ASTCompiler:
         """
         Rule-Based Guardrail:
         Automatically injects a LIMIT clause if one is not present, preventing accidental
-        runaway full-table scans.
+        runaway full-table scans. (Disabled if default_limit is None).
         """
-        if isinstance(tree, exp.Select) and not tree.args.get("limit"):
+        if self.default_limit and isinstance(tree, exp.Select) and not tree.args.get("limit"):
             tree = tree.limit(self.default_limit, copy=False)
             patches.append(f"Auto-patched: Injected safety LIMIT {self.default_limit}")
         return tree

@@ -3,10 +3,10 @@ from typing import List, Optional, Dict, Any
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from catalog import DatabaseCatalog
-from compiler import ASTCompiler, CompilationResult
-from generator import LLMGenerator
-import config
+from src.core.catalog import DatabaseCatalog
+from src.core.compiler import ASTCompiler, CompilationResult
+from src.generator import LLMGenerator
+from src import config
 
 @dataclass
 class PipelineResult:

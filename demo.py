@@ -1,10 +1,6 @@
 import sys
 import time
-from catalog import DatabaseCatalog
-from compiler import ASTCompiler
-from generator import LLMGenerator
-from pipeline import TextToSQLPipeline
-import config
+from src import DatabaseCatalog, ASTCompiler, LLMGenerator, TextToSQLPipeline, config
 
 def print_banner(text: str):
     print("\n" + "=" * 70, flush=True)

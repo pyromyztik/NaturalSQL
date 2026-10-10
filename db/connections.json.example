@@ -1,0 +1,13 @@
+{
+  "_comment": "This file is gitignored. Saved connections will be stored in db/connections.json automatically when you connect via the Web UI or CLI.",
+  "sample_oracle": {
+    "id": "sample_oracle",
+    "name": "Oracle Container",
+    "dialect": "oracle",
+    "connection_input": "user/password@localhost:1521/FREEPDB1",
+    "engine_url": "oracle+oracledb://user:password@localhost:1521/?service_name=FREEPDB1",
+    "display_url": "user:****@localhost:1521/FREEPDB1",
+    "created_at": 1700000000
+  }
+}
+

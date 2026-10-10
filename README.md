@@ -1,84 +1,67 @@
-# NaturalSQL: Compiler-Style Text-to-SQL Gatekeeper
+# NaturalSQL: Universal Database Assistant
 
-A deterministic safety, verification, and repair pipeline between an LLM and databases (PostgreSQL & SQLite).
+A deterministic safety, verification, and repair pipeline between an LLM and live databases (**Oracle**, **PostgreSQL**, **MySQL**).
 
-Instead of executing raw LLM-generated SQL directly on your database, **NaturalSQL** parses the query into an **Abstract Syntax Tree (AST)** using `sqlglot`, validates it against the schema catalog, auto-patches common model omissions (missing `GROUP BY` projections, safety `LIMIT`s), and executes bounded surgical feedback loops for hallucinated identifiers.
+Instead of executing raw LLM-generated SQL directly on your database, **NaturalSQL** parses the query into an **Abstract Syntax Tree (AST)** using `sqlglot`, validates it against the schema catalog, auto-patches common model omissions, and enforces a strict **Human-in-the-Loop Approval Gate** before any data-modifying queries (`INSERT`, `UPDATE`, `DELETE`, `ALTER`, `DROP`) are executed.
 
 ---
 
-## Clean Project Structure
+## Key Capabilities
 
-```
-NaturalSQL/
-├── src/                               # Core Python package (PostgreSQL & AST Engine)
-│   ├── core/
-│   │   ├── compiler.py               # AST Compiler Gatekeeper & Auto-Patchers
-│   │   ├── catalog.py                # Schema metadata & PostgreSQL introspection
-│   │   └── sqlite_catalog.py         # SQLite schema introspection
-│   ├── generator.py                  # Ollama connector with retry & token bounding
-│   ├── pipeline.py                   # End-to-end orchestration & surgical repair loop
-│   ├── config.py                     # Core application configuration
-│   └── __init__.py                   # Package exports
-├── benchmark/                         # Fully isolated benchmark suite
-│   ├── config.py                     # Benchmark-specific settings & timeouts
-│   ├── executor.py                   # Read-only SQLite runner with 5s query watchdog
-│   ├── checkpoint.py                 # Atomic checkpoint manager (crash & resume support)
-│   ├── reporter.py                   # Live ETA progress, Markdown & JSON reports
-│   ├── runner.py                     # Benchmark execution engine & signal handler
-│   ├── run.py                        # Standalone benchmark CLI entry point
-│   ├── fixtures/                     # Datasets & SQLite database fixtures
-│   │   ├── concert_singer.sqlite     # Spider SQLite database fixture
-│   │   ├── spider_dev_sample.json    # 45 concert_singer dev queries
-│   │   └── spider_dev_full.json      # All 1,034 Spider dev queries
-│   └── results/                      # Auto-generated (git-ignored) run artifacts
-│       ├── checkpoints/              # Resumable run checkpoints
-│       ├── reports/                  # Detailed Markdown summaries
-│       └── data/                     # Complete execution metric JSON dumps
-├── db/                                # PostgreSQL utilities
-│   ├── seed_postgres.py              # Live PostgreSQL seeder
-│   └── seed_ecommerce.sql            # Sample e-commerce store dataset
-├── demo.py                            # Interactive & scenario demonstration CLI
-├── run_benchmark.py                   # Lightweight convenience runner
-├── Modelfile                          # Tuned Ollama Modelfile for naturalsql model
-└── README.md
-```
+1. **Universal Database Connectivity**:
+   Connect to any database using industry-standard Connection URIs:
+   - **Oracle**: `oracle://user:password@localhost:1521/FREEPDB1` *(or terminal EZConnect: `user/password@host:1521/service`)*
+   - **PostgreSQL**: `postgresql://postgres:password@localhost:5432/dbname`
+   - **MySQL**: `mysql://root:password@localhost:3306/dbname`
+2. **Minimal Code & Universal Introspection**:
+   Powered by SQLAlchemy universal reflection (`inspect(engine)`) with pure-Python drivers (`oracledb` in thin mode, `psycopg2`, `pymysql`).
+3. **Dual Interfaces**:
+   - **Web Application**: Interactive chat interface with live streaming tokens, schema drawer, and data grids.
+   - **Command Line Interface (CLI)**: Interactive shell (`cli.py`) and scriptable one-shot execution.
+4. **Human-in-the-Loop Safety Gatekeeper**:
+   - `SELECT` queries compile and execute automatically.
+   - Any mutation (`INSERT`, `UPDATE`, `DELETE`, etc.) halts and requires explicit user confirmation before touching the database.
+5. **Blank by Default & Privacy**:
+   Starts with no pre-connected databases. Includes a one-click / one-command action to forget all saved databases.
 
 ---
 
 ## Quickstart
 
-### 1. Run the Interactive Demo
+### 1. Launch the Web Application
 ```powershell
-# Run the 3 pre-built scenarios
-python demo.py
-
-# Or run interactive CLI where you can type arbitrary English questions
-python demo.py --interactive
+python run_app.py
 ```
+*Opens automatically at `http://127.0.0.1:8000`.*
 
-### 2. Run the Resilient Spider Benchmark
-Compare the **Baseline Naive LLM** against the **NaturalSQL Gatekeeper** on Spider validation queries:
-
+### 2. Run the Interactive CLI Shell
 ```powershell
-# Run the benchmark (supports automatic resuming from checkpoints)
-python benchmark/run.py --samples 45
-
-# Start fresh (ignores and clears prior checkpoints)
-python benchmark/run.py --samples 45 --fresh
-
-# Resume from query 26 through 45
-python benchmark/run.py --offset 25 --samples 20
+python cli.py
 ```
 
-*Results, checkpoints, and Markdown reports are automatically saved under `benchmark/results/`.*
+Inside the CLI shell:
+```text
+NaturalSQL (oracle)> Find all employees earning over 60000
+NaturalSQL (oracle)> /tables
+NaturalSQL (oracle)> /connect postgresql://postgres:password@localhost:5432/postgres
+NaturalSQL (oracle)> /forget
+NaturalSQL (oracle)> /exit
 ```
 
----
+### 3. One-Shot CLI Execution
+```powershell
+# Query Oracle container
+python cli.py --conn "oracle://user:password@localhost:1521/FREEPDB1" --query "How many employees are there?"
 
-## Benchmark Metrics Reported
+# Query local PostgreSQL
+python cli.py --conn "postgresql://postgres:password@localhost:5432/postgres" --query "List all tables"
+```
 
-1. **Valid SQL Rate (Executability)**: Percentage of queries that parse and execute on the database without engine errors.
-2. **Execution Accuracy (EX)**: Matches the returned data tuples against human-written gold ground-truth queries.
-3. **Execution Accuracy by Difficulty**: Breaks down results across **Easy**, **Medium**, **Hard**, and **Extra Hard** tiers.
-4. **Latency Tracking**: Average latency per query (seconds) and total benchmark execution time.
-5. **Zero-Token Auto-Patches**: Total count of queries salvaged deterministically by the compiler without making an LLM API call.
+### 4. Manage Saved Connections
+```powershell
+# List saved connections
+python cli.py --list
+
+# Forget all saved connections
+python cli.py --forget
+```

@@ -10,3 +10,4 @@ venv/
 .system_generated/
 
 benchmark/
+db/connections.json

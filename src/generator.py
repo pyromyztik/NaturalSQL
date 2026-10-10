@@ -2,22 +2,31 @@ import json
 import urllib.request
 import re
 import time
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Generator, Tuple, Any
 from src import config
 
-SYSTEM_PROMPT = """You are NaturalSQL, a deterministic PostgreSQL generation engine.
-Your task is to convert natural language requests into valid, executable PostgreSQL queries strictly conforming to the provided database schema.
+SYSTEM_PROMPT = """You are NaturalSQL Agent, a deterministic SQL generation engine and database assistant.
+Your primary task is to convert natural language requests into valid, executable SQL queries strictly conforming to the provided database schema and dialect.
 
-RULES:
-1. Output MUST be ONLY valid SQL code wrapped inside a single ```sql ... ``` markdown code block.
-2. DO NOT write explanations, greetings, or commentary before or after the code block.
-3. Use ONLY table and column names that exist in the provided schema. NEVER invent, assume, or hallucinate identifiers.
-4. Adhere strictly to PostgreSQL syntax and conventions.
-5. In ORDER BY and HAVING, you may reference aliases defined in the SELECT clause.
-6. When joining tables, explicitly qualify columns with table names or short aliases (e.g. c.customer_id).
-7. Use the explicit foreign key relationships defined in the schema for joins.
-8. Only generate read-only SELECT queries. Never generate DROP, DELETE, INSERT, or UPDATE statements.
+MODES OF OPERATION:
+
+1. SQL GENERATION MODE (DEFAULT & PRIMARY):
+- Whenever the user asks for data retrieval, counts, lists, summaries, reports, statistics, or database modifications (inserting records, updating data, deleting records, creating tables):
+- Output MUST be ONLY valid SQL code wrapped inside a single ```sql ... ``` markdown code block.
+- Absolutely DO NOT include conversational text, pleasantries, explanations, or notes outside the ```sql ... ``` block.
+- Use ONLY table and column names that exist in the provided schema. NEVER invent, assume, or hallucinate identifiers.
+- When generating INSERT, UPDATE, DELETE, or CREATE statements, strictly conform to the existing schema types and constraints.
+- When joining tables, explicitly qualify columns with table names or short aliases (e.g. e.employee_id).
+- Respect dialect-specific syntax (e.g. Oracle, PostgreSQL, MySQL) indicated in the schema prompt.
+
+2. DIRECT CONVERSATIONAL RESPONSE MODE (EXCLUSIVELY FOR NON-SQL PROMPTS):
+- If and ONLY if the user's prompt CANNOT become an SQL query (for example: greetings like "hello", chit-chat, personal questions, poetry, general world knowledge unrelated to the database, or nonsensical gibberish):
+- Respond directly in polite, concise natural language (do NOT use ```sql blocks).
+- State that you are NaturalSQL, an SQL assistant for this connected database, and politely urge the user to provide a query or database task.
+- STRICT GUARDRAIL: Do NOT abuse this mode. If the prompt can reasonably be interpreted as a database request, you MUST generate SQL and NOT converse.
 """
+
+SQL_START_KEYWORDS = r"\b(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\b"
 
 class LLMGenerator:
     def __init__(self, host: str = config.OLLAMA_HOST, model: str = config.OLLAMA_MODEL, timeout: int = None, max_tokens: int = 1024):
@@ -26,14 +35,14 @@ class LLMGenerator:
         self.timeout = timeout if timeout is not None else getattr(config, "OLLAMA_TIMEOUT", 120)
         self.max_tokens = max_tokens
 
-    def _call_ollama(self, messages: List[Dict[str, str]], timeout: int = None, retries: int = 2) -> str:
+    def _call_ollama_stream(self, messages: List[Dict[str, str]], timeout: int = None) -> Generator[Dict[str, Any], None, Tuple[str, str]]:
         if timeout is None:
             timeout = self.timeout
         url = f"{self.host}/api/chat"
         options = {
             "temperature": 0.05,
             "top_p": 0.9,
-            "num_ctx": 3072  # Optimal context for 100% GPU offload on RTX 4060
+            "num_ctx": 3072
         }
         if self.max_tokens:
             options["num_predict"] = self.max_tokens
@@ -41,60 +50,105 @@ class LLMGenerator:
         payload = {
             "model": self.model,
             "messages": messages,
-            "stream": False,
+            "stream": True,
             "options": options
         }
-        
-        last_error = None
-        for attempt in range(1, retries + 1):
-            try:
-                req = urllib.request.Request(
-                    url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"}
-                )
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    result = json.loads(response.read().decode("utf-8"))
-                    msg = result.get("message", {})
-                    content = msg.get("content", "").strip()
-                    # Fallback: if content is empty but model put output in thinking block
-                    if not content and msg.get("thinking"):
-                        content = msg.get("thinking", "").strip()
-                    return content
-            except Exception as e:
-                last_error = e
-                if attempt < retries:
-                    time.sleep(1.0)
-                    continue
-                raise RuntimeError(f"Failed to communicate with Ollama at {url}: {last_error}")
 
-    def extract_sql(self, response_text: str) -> str:
-        """Extracts SQL from ```sql ... ``` block or raw text, stripping thoughts."""
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+
+        full_content = []
+        full_thinking = []
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                for line in response:
+                    line_str = line.decode("utf-8").strip()
+                    if not line_str:
+                        continue
+                    try:
+                        chunk = json.loads(line_str)
+                    except json.JSONDecodeError:
+                        continue
+
+                    msg = chunk.get("message", {})
+                    thinking_delta = msg.get("thinking", "")
+                    content_delta = msg.get("content", "")
+
+                    if thinking_delta:
+                        full_thinking.append(thinking_delta)
+                        yield {"type": "thinking", "token": thinking_delta}
+
+                    if content_delta:
+                        full_content.append(content_delta)
+                        yield {"type": "content", "token": content_delta}
+
+                    if chunk.get("done"):
+                        break
+        except Exception as e:
+            raise RuntimeError(f"Failed during Ollama streaming from {url}: {e}")
+
+        total_content = "".join(full_content).strip()
+        total_thinking = "".join(full_thinking).strip()
+        
+        if not total_content and total_thinking:
+            total_content = total_thinking
+
+        return total_content, total_thinking
+
+    def parse_response(self, response_text: str) -> Dict[str, Any]:
+        """
+        Parses LLM output into either a SQL query or a direct conversational message.
+        """
         if not response_text:
-            return ""
+            return {"type": "sql", "sql": ""}
 
         # 1. Strip any <think>...</think> reasoning tags
         cleaned = re.sub(r"<think>[\s\S]*?</think>", "", response_text, flags=re.IGNORECASE).strip()
 
-        # 2. Extract ```sql ... ``` block
+        # 2. Extract ```sql ... ``` or ``` ... ``` block if present
         match = re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", cleaned, re.IGNORECASE)
         if match and match.group(1).strip():
-            return match.group(1).strip()
+            candidate = match.group(1).strip().strip("`").strip()
+            if re.search(SQL_START_KEYWORDS, candidate, re.IGNORECASE):
+                return {"type": "sql", "sql": candidate}
 
-        # 3. If no backticks, search for raw SELECT statement
-        if "select" in cleaned.lower():
-            sel_match = re.search(r"(SELECT\s+[\s\S]+)", cleaned, re.IGNORECASE)
-            if sel_match:
-                return sel_match.group(1).strip()
+        # 3. Raw SQL statement (WITHOUT code blocks):
+        # Must explicitly START with an SQL keyword at the beginning of the text
+        raw_start = re.match(
+            r"^\s*(SELECT|WITH|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|TRUNCATE\s+TABLE)\b",
+            cleaned,
+            re.IGNORECASE
+        )
+        if raw_start:
+            # Check if this is conversational prose containing conversational indicators
+            conversational_markers = [
+                "i cannot", "i am", "naturalsql", "sorry", "cannot be",
+                "please clarify", "i can help", "if you need to", "you don't"
+            ]
+            if not any(marker in cleaned.lower() for marker in conversational_markers):
+                return {"type": "sql", "sql": cleaned}
 
-        return cleaned.strip()
+        # 4. If neither SQL block nor valid SQL statement found:
+        return {
+            "type": "conversational",
+            "text": cleaned
+        }
 
-    def generate(self, user_question: str, schema_text: str) -> str:
-        """Generates initial SQL from natural language."""
+    def extract_sql(self, response_text: str) -> str:
+        parsed = self.parse_response(response_text)
+        if parsed.get("type") == "sql":
+            return parsed.get("sql", "")
+        return ""
+
+    def generate_stream(self, user_question: str, schema_text: str) -> Generator[Dict[str, Any], None, Dict[str, Any]]:
         user_content = (
             f"DATABASE SCHEMA:\n\n{schema_text}\n\n"
-            f"QUESTION: {user_question}\n\n"
-            f"Write the PostgreSQL query that answers this question:"
+            f"QUESTION / PROMPT: {user_question}\n\n"
+            f"INSTRUCTION: If this prompt can be answered or executed on the database, generate ONLY the SQL query in a ```sql ... ``` block. If it cannot become an SQL query, respond directly in natural language:"
         )
 
         messages = [
@@ -102,20 +156,24 @@ class LLMGenerator:
             {"role": "user", "content": user_content}
         ]
 
-        raw_response = self._call_ollama(messages)
-        return self.extract_sql(raw_response)
+        stream_gen = self._call_ollama_stream(messages)
+        full_content = ""
+        try:
+            while True:
+                token_item = next(stream_gen)
+                yield token_item
+        except StopIteration as e:
+            full_content, _ = e.value
 
-    def generate_repair(
+        return self.parse_response(full_content)
+
+    def generate_repair_stream(
         self,
         user_question: str,
         schema_text: str,
         failed_sql: str,
         surgical_feedback: str
-    ) -> str:
-        """
-        Sends targeted compiler feedback back to the LLM in a fresh conversation turn.
-        Avoids KV cache bloat and eliminates reasoning loops.
-        """
+    ) -> Generator[Dict[str, Any], None, str]:
         repair_content = (
             f"DATABASE SCHEMA:\n\n{schema_text}\n\n"
             f"QUESTION: {user_question}\n\n"
@@ -132,5 +190,29 @@ class LLMGenerator:
             {"role": "user", "content": repair_content}
         ]
 
-        raw_response = self._call_ollama(messages)
-        return self.extract_sql(raw_response)
+        stream_gen = self._call_ollama_stream(messages)
+        full_content = ""
+        try:
+            while True:
+                token_item = next(stream_gen)
+                yield token_item
+        except StopIteration as e:
+            full_content, _ = e.value
+
+        return self.extract_sql(full_content)
+
+    def generate(self, user_question: str, schema_text: str) -> str:
+        gen = self.generate_stream(user_question, schema_text)
+        try:
+            while True:
+                next(gen)
+        except StopIteration as e:
+            return e.value
+
+    def generate_repair(self, user_question: str, schema_text: str, failed_sql: str, surgical_feedback: str) -> str:
+        gen = self.generate_repair_stream(user_question, schema_text, failed_sql, surgical_feedback)
+        try:
+            while True:
+                next(gen)
+        except StopIteration as e:
+            return e.value

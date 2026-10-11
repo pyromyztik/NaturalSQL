@@ -83,6 +83,9 @@ class QueryRequest(BaseModel):
     question: str
     catalog_id: str
     execute: bool = True
+    failed_sql: Optional[str] = None
+    error_feedback: Optional[str] = None
+    history: Optional[List[Dict[str, Any]]] = None
 
 class ExecuteSQLRequest(BaseModel):
     sql: str
@@ -221,7 +224,13 @@ async def chat_stream(request: QueryRequest):
     )
 
     async def event_generator():
-        async for event in pipeline.run_stream(question=request.question, execute=request.execute):
+        async for event in pipeline.run_stream(
+            question=request.question,
+            execute=request.execute,
+            failed_sql=request.failed_sql,
+            error_feedback=request.error_feedback,
+            history=request.history
+        ):
             yield {
                 "event": "message",
                 "data": event
@@ -244,7 +253,7 @@ async def execute_manual_sql(request: ExecuteSQLRequest):
     compilation = compiler.compile(request.sql)
 
     is_mutation = compilation.is_mutation if compilation.is_valid else (
-        request.sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE"))
+        any(k in request.sql.upper() for k in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "REPLACE"))
     )
 
     # STRICT SAFETY GUARD: If statement is a mutation, require user_approved
@@ -255,6 +264,15 @@ async def execute_manual_sql(request: ExecuteSQLRequest):
         )
 
     exec_result = execute_sql_query(engine_url, request.sql, is_mutation=is_mutation)
+
+    # If DDL modified schema (CREATE/DROP/ALTER), refresh cached catalog
+    if exec_result.get("success") and any(k in request.sql.upper() for k in ["CREATE", "DROP", "ALTER"]):
+        try:
+            new_cat, _ = introspect_connection(engine_url)
+            cat_info["catalog"] = new_cat
+        except Exception as e:
+            print(f"[Warning] Failed to re-introspect catalog after DDL: {e}")
+
     return exec_result
 
 # Mount static files if frontend is built

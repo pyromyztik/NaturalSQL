@@ -8,6 +8,7 @@ from datetime import datetime, date
 from typing import Dict, Any, Optional, List, Tuple
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
+import sqlglot
 
 from .catalog import DatabaseCatalog, TableInfo, ColumnInfo
 
@@ -227,48 +228,181 @@ def _json_serializable(val: Any) -> Any:
         return val.decode("utf-8", errors="replace")
     return val
 
+def split_sql_statements(sql: str, dialect: str = "sqlite") -> List[str]:
+    """
+    Splits multi-statement SQL text into individual executable statements.
+    Preserves semicolons inside string literals and comments.
+    """
+    clean_sql = (sql or "").strip()
+    if not clean_sql:
+        return []
+
+    read_dialect = (
+        "postgres" if dialect.startswith("postgres") else
+        ("oracle" if dialect.startswith("oracle") else
+        ("mysql" if dialect.startswith("mysql") else "sqlite"))
+    )
+
+    # 1. Try sqlglot parse
+    try:
+        parsed = [s for s in sqlglot.parse(clean_sql, read=read_dialect) if s]
+        if parsed:
+            return [s.sql(dialect=read_dialect) for s in parsed]
+    except Exception:
+        pass
+
+    # 2. Tokenizer/quote-aware fallback
+    statements = []
+    current = []
+    in_sq = False
+    in_dq = False
+    in_bt = False
+    in_lc = False
+    in_bc = False
+    i = 0
+    n = len(clean_sql)
+    while i < n:
+        ch = clean_sql[i]
+        next_ch = clean_sql[i + 1] if i + 1 < n else ""
+        if not (in_sq or in_dq or in_bt):
+            if in_lc:
+                if ch == "\n":
+                    in_lc = False
+                current.append(ch)
+                i += 1
+                continue
+            elif in_bc:
+                if ch == "*" and next_ch == "/":
+                    in_bc = False
+                    current.append(ch)
+                    current.append(next_ch)
+                    i += 2
+                    continue
+                current.append(ch)
+                i += 1
+                continue
+            elif ch == "-" and next_ch == "-":
+                in_lc = True
+                current.append(ch)
+                current.append(next_ch)
+                i += 2
+                continue
+            elif ch == "/" and next_ch == "*":
+                in_bc = True
+                current.append(ch)
+                current.append(next_ch)
+                i += 2
+                continue
+
+        if ch == "'" and not (in_dq or in_bt):
+            if in_sq and next_ch == "'":
+                current.append(ch)
+                current.append(next_ch)
+                i += 2
+                continue
+            in_sq = not in_sq
+            current.append(ch)
+            i += 1
+            continue
+        elif ch == '"' and not (in_sq or in_bt):
+            in_dq = not in_dq
+            current.append(ch)
+            i += 1
+            continue
+        elif ch == '`' and not (in_sq or in_dq):
+            in_bt = not in_bt
+            current.append(ch)
+            i += 1
+            continue
+
+        if ch == ";" and not (in_sq or in_dq or in_bt or in_lc or in_bc):
+            stmt = "".join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+            i += 1
+            continue
+
+        current.append(ch)
+        i += 1
+
+    rem = "".join(current).strip()
+    if rem:
+        statements.append(rem)
+
+    return statements if statements else [clean_sql]
+
 def execute_sql_query(engine_url: str, sql: str, is_mutation: bool = False) -> Dict[str, Any]:
     """
-    Executes a SQL statement on the connected database.
+    Executes a SQL statement or multi-statement script on the connected database.
+    - Handles single and multi-statement execution sequentially in the same transaction
     - Handles SELECT (fetches rows and column metadata)
     - Handles DML/DDL (INSERT/UPDATE/DELETE/ALTER/CREATE) with commit and rows_affected
     """
     t0 = time.time()
     engine = create_engine(engine_url, pool_pre_ping=True)
     try:
+        dialect_name = engine.dialect.name.lower()
+        statements = split_sql_statements(sql, dialect=dialect_name)
+        if not statements:
+            return {
+                "success": True,
+                "is_mutation": False,
+                "columns": [],
+                "rows": [],
+                "row_count": 0,
+                "duration_ms": 0
+            }
+
+        last_result = None
+        total_rows_affected = 0
+        has_mutations = False
+
         with engine.connect() as conn:
-            statement = text(sql)
-            result = conn.execute(statement)
-            
-            if is_mutation or sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE")):
+            for stmt_str in statements:
+                if not stmt_str.strip():
+                    continue
+                result = conn.execute(text(stmt_str))
+                last_result = result
+                stmt_upper = stmt_str.strip().upper()
+                if is_mutation or stmt_upper.startswith(("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "REPLACE")):
+                    has_mutations = True
+                    rc = getattr(result, "rowcount", 0)
+                    if rc and rc > 0:
+                        total_rows_affected += rc
+
+            if has_mutations or is_mutation:
                 conn.commit()
-                rows_affected = getattr(result, "rowcount", 0)
-                duration_ms = round((time.time() - t0) * 1000)
-                return {
-                    "success": True,
-                    "is_mutation": True,
-                    "rows_affected": max(rows_affected, 0),
-                    "columns": ["status", "rows_affected"],
-                    "rows": [{"status": "Executed successfully", "rows_affected": max(rows_affected, 0)}],
-                    "row_count": 1,
-                    "duration_ms": duration_ms
-                }
-            else:
-                columns = list(result.keys()) if result.returns_rows else []
-                raw_rows = result.fetchall() if result.returns_rows else []
+
+            duration_ms = round((time.time() - t0) * 1000)
+
+            if last_result and last_result.returns_rows:
+                columns = list(last_result.keys())
+                raw_rows = last_result.fetchall()
                 rows = []
                 for row in raw_rows:
                     row_dict = {}
                     for col_name, val in zip(columns, row):
                         row_dict[col_name] = _json_serializable(val)
                     rows.append(row_dict)
-                duration_ms = round((time.time() - t0) * 1000)
                 return {
                     "success": True,
                     "is_mutation": False,
                     "columns": columns,
                     "rows": rows,
                     "row_count": len(rows),
+                    "duration_ms": duration_ms
+                }
+            else:
+                stmt_count = len(statements)
+                status_msg = f"Executed {stmt_count} statements successfully" if stmt_count > 1 else "Executed successfully"
+                return {
+                    "success": True,
+                    "is_mutation": True,
+                    "rows_affected": max(total_rows_affected, 0),
+                    "columns": ["status", "rows_affected"],
+                    "rows": [{"status": status_msg, "rows_affected": max(total_rows_affected, 0)}],
+                    "row_count": 1,
                     "duration_ms": duration_ms
                 }
     except Exception as e:

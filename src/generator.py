@@ -29,11 +29,12 @@ MODES OF OPERATION:
 SQL_START_KEYWORDS = r"\b(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\b"
 
 class LLMGenerator:
-    def __init__(self, host: str = config.OLLAMA_HOST, model: str = config.OLLAMA_MODEL, timeout: int = None, max_tokens: int = 1024):
+    def __init__(self, host: str = config.OLLAMA_HOST, model: str = config.OLLAMA_MODEL, timeout: int = None, max_tokens: int = None):
         self.host = host.rstrip("/")
         self.model = model
-        self.timeout = timeout if timeout is not None else getattr(config, "OLLAMA_TIMEOUT", 120)
-        self.max_tokens = max_tokens
+        self.timeout = timeout if timeout is not None else getattr(config, "OLLAMA_TIMEOUT", 300)
+        self.max_tokens = max_tokens if max_tokens is not None else getattr(config, "OLLAMA_MAX_TOKENS", 8192)
+        self.num_ctx = getattr(config, "OLLAMA_NUM_CTX", 16384)
 
     def _call_ollama_stream(self, messages: List[Dict[str, str]], timeout: int = None) -> Generator[Dict[str, Any], None, Tuple[str, str]]:
         if timeout is None:
@@ -42,7 +43,7 @@ class LLMGenerator:
         options = {
             "temperature": 0.05,
             "top_p": 0.9,
-            "num_ctx": 3072
+            "num_ctx": self.num_ctx
         }
         if self.max_tokens:
             options["num_predict"] = self.max_tokens
@@ -109,8 +110,8 @@ class LLMGenerator:
         # 1. Strip any <think>...</think> reasoning tags
         cleaned = re.sub(r"<think>[\s\S]*?</think>", "", response_text, flags=re.IGNORECASE).strip()
 
-        # 2. Extract ```sql ... ``` or ``` ... ``` block if present
-        match = re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", cleaned, re.IGNORECASE)
+        # 2. Extract ```sql ... ``` or ``` ... ``` block if present (even if closing fence is omitted)
+        match = re.search(r"```(?:sql)?\s*([\s\S]*?)(?:```|$)", cleaned, re.IGNORECASE)
         if match and match.group(1).strip():
             candidate = match.group(1).strip().strip("`").strip()
             if re.search(SQL_START_KEYWORDS, candidate, re.IGNORECASE):
@@ -144,11 +145,46 @@ class LLMGenerator:
             return parsed.get("sql", "")
         return ""
 
-    def generate_stream(self, user_question: str, schema_text: str) -> Generator[Dict[str, Any], None, Dict[str, Any]]:
+    def _format_history(self, history: Optional[List[Dict[str, Any]]]) -> str:
+        """
+        Builds a compact summary of recent turns (strictly last 2 interactions).
+        Keeps VRAM footprint minimal (~30-80 tokens) for 8GB VRAM environments.
+        """
+        if not history:
+            return ""
+
+        recent = history[-2:]
+        lines = []
+        for item in recent:
+            q = (item.get("question") or "").strip() if isinstance(item, dict) else getattr(item, "question", "").strip()
+            s = (item.get("sql") or "").strip() if isinstance(item, dict) else getattr(item, "sql", "").strip()
+            r = (item.get("response") or "").strip() if isinstance(item, dict) else getattr(item, "response", "").strip()
+            if q and s:
+                lines.append(f'- User: "{q}" -> SQL: {s}')
+            elif q and r:
+                lines.append(f'- User: "{q}" -> Note: {r[:100]}')
+
+        if not lines:
+            return ""
+
+        return (
+            "RECENT CONVERSATION CONTEXT (last 1-2 interactions for resolving follow-ups):\n"
+            + "\n".join(lines)
+            + "\n\n"
+        )
+
+    def generate_stream(
+        self,
+        user_question: str,
+        schema_text: str,
+        history: Optional[List[Dict[str, Any]]] = None
+    ) -> Generator[Dict[str, Any], None, Dict[str, Any]]:
+        history_text = self._format_history(history)
         user_content = (
             f"DATABASE SCHEMA:\n\n{schema_text}\n\n"
-            f"QUESTION / PROMPT: {user_question}\n\n"
-            f"INSTRUCTION: If this prompt can be answered or executed on the database, generate ONLY the SQL query in a ```sql ... ``` block. If it cannot become an SQL query, respond directly in natural language:"
+            f"{history_text}"
+            f"CURRENT QUESTION / TASK: {user_question}\n\n"
+            f"INSTRUCTION: If this prompt can be answered or executed on the database, generate ONLY the SQL query in a ```sql ... ``` block. If the prompt references previous queries (e.g. 'order them', 'filter those', 'show their names'), use the recent conversation history above to resolve the context. If it cannot become an SQL query, respond directly in natural language:"
         )
 
         messages = [
@@ -172,14 +208,17 @@ class LLMGenerator:
         user_question: str,
         schema_text: str,
         failed_sql: str,
-        surgical_feedback: str
+        surgical_feedback: str,
+        history: Optional[List[Dict[str, Any]]] = None
     ) -> Generator[Dict[str, Any], None, str]:
+        history_text = self._format_history(history)
         repair_content = (
             f"DATABASE SCHEMA:\n\n{schema_text}\n\n"
+            f"{history_text}"
             f"QUESTION: {user_question}\n\n"
-            f"Your previous query was rejected by the AST Compiler:\n"
+            f"Your previous query was rejected:\n"
             f"```sql\n{failed_sql}\n```\n\n"
-            f"COMPILER ERROR FEEDBACK:\n{surgical_feedback}\n\n"
+            f"ERROR FEEDBACK:\n{surgical_feedback}\n\n"
             f"INSTRUCTION:\n"
             f"Rewrite the SQL query to fix the exact error noted above. "
             f"Adhere strictly to the schema. Output ONLY valid SQL inside a ```sql ... ``` block."

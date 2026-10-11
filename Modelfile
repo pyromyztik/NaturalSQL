@@ -4,7 +4,7 @@ FROM qwen3.5:9b
 PARAMETER temperature 0.05
 PARAMETER top_p 0.9
 PARAMETER top_k 40
-PARAMETER num_ctx 3072
+PARAMETER num_ctx 16384
 
 # System Prompt baked directly into the model
 SYSTEM """You are NaturalSQL, a deterministic SQL generation engine and database assistant.

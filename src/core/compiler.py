@@ -99,16 +99,17 @@ class ASTCompiler:
             if not mutation_type:
                 mutation_type = "DATA_MODIFICATION"
 
-        # 3. Catalog Semantic Verification
+        # 3. Catalog & Semantic Verification
         # For CREATE statements, skip table existence check since table is new
         catalog_errors = []
         if not any(tree.find_all(exp.Create)):
             catalog_errors = self._validate_catalog(tree)
+            catalog_errors.extend(self._validate_group_by_semantics(tree))
             
         if catalog_errors:
-            feedback = "The query failed catalog validation against the database schema:\n"
+            feedback = "The query failed catalog and semantic validation against the database schema:\n"
             feedback += "\n".join(f"- {err}" for err in catalog_errors)
-            feedback += "\nPlease correct the table and column names according to the schema."
+            feedback += "\nPlease correct the table, column names, and aggregation/GROUP BY rules."
             return CompilationResult(
                 is_valid=False,
                 original_sql=cleaned_sql,
@@ -122,6 +123,7 @@ class ASTCompiler:
         # 4. Tier 1: Rule-Based Auto-Patching (Zero tokens, only for SELECT)
         patches_applied = []
         if not is_mutation and isinstance(tree, exp.Select):
+            tree = self._auto_patch_cross_join(tree, patches_applied)
             tree = self._auto_patch_group_by(tree, patches_applied)
             tree = self._auto_patch_limit(tree, patches_applied)
 
@@ -237,27 +239,77 @@ class ASTCompiler:
 
         return errors
 
+    def _validate_group_by_semantics(self, tree: exp.Expression) -> List[str]:
+        """
+        Validates that queries with GROUP BY do not project un-aggregated columns
+        or un-aggregated columns inside window functions. Works across CTEs and main queries.
+        """
+        errors = []
+        for select in tree.find_all(exp.Select):
+            group = select.args.get("group")
+            if not group:
+                continue
+
+            cte_ancestor = select.find_ancestor(exp.CTE)
+            ctx = f"In CTE '{cte_ancestor.alias or cte_ancestor.name}': " if cte_ancestor else ""
+
+            group_cols = set()
+            for ge in group.expressions:
+                for col in ge.find_all(exp.Column):
+                    group_cols.add(col.sql().lower())
+                    if hasattr(col, "name") and col.name:
+                        group_cols.add(col.name.lower())
+
+            check_nodes = list(select.selects)
+            having = select.args.get("having")
+            if having:
+                check_nodes.append(having)
+
+            for s in check_nodes:
+                for col in s.find_all(exp.Column):
+                    if col.find_ancestor(exp.Select) != select:
+                        continue
+                    if col.find_ancestor(exp.AggFunc) is not None:
+                        continue
+                    col_name = col.sql()
+                    c_name = col.name if hasattr(col, "name") else ""
+                    if col_name.lower() not in group_cols and c_name.lower() not in group_cols:
+                        errors.append(
+                            f"{ctx}Column '{col_name}' must appear in the GROUP BY clause or be used in an aggregate function."
+                        )
+        return errors
+
+    def _auto_patch_cross_join(self, tree: exp.Expression, patches: List[str]) -> exp.Expression:
+        if not isinstance(tree, exp.Select):
+            return tree
+        patched = False
+        for j in tree.find_all(exp.Join):
+            if (j.kind or "").upper() == "CROSS" and j.args.get("on"):
+                j.set("kind", "")
+                patched = True
+        if patched:
+            patches.append("Auto-patched: Converted invalid CROSS JOIN with ON clause to INNER JOIN")
+        return tree
+
     def _auto_patch_group_by(self, tree: exp.Expression, patches: List[str]) -> exp.Expression:
         if not isinstance(tree, exp.Select):
             return tree
 
-        aggregates = list(tree.find_all(exp.AggFunc))
-        if not aggregates:
+        # Identify genuine aggregate functions directly in the outer SELECT list
+        # (Exclude window functions like AVG() OVER (...) and aggregates inside subqueries)
+        outer_aggs = []
+        for s in tree.selects:
+            for agg in s.find_all(exp.AggFunc):
+                if agg.find_ancestor(exp.Window) is None and agg.find_ancestor(exp.Select) == tree:
+                    outer_aggs.append(agg)
+
+        has_existing_group = bool(tree.args.get("group"))
+        if not outer_aggs and not has_existing_group:
             return tree
 
         agg_subtrees = set()
-        for agg in aggregates:
+        for agg in outer_aggs:
             agg_subtrees.update(agg.walk())
-
-        non_agg_columns = []
-        for select_expr in tree.selects:
-            for node in select_expr.walk():
-                if isinstance(node, exp.Column) and node not in agg_subtrees:
-                    if not any(node in a.walk() for a in aggregates):
-                        non_agg_columns.append(node)
-
-        if not non_agg_columns:
-            return tree
 
         existing_group = tree.args.get("group")
         existing_group_sql = set()
@@ -265,10 +317,21 @@ class ASTCompiler:
             for g_expr in existing_group.expressions:
                 existing_group_sql.add(g_expr.sql().lower())
 
-        missing_to_group = [
-            c for c in non_agg_columns
-            if c.sql().lower() not in existing_group_sql
-        ]
+        missing_to_group = []
+        seen = set(existing_group_sql)
+        for select_expr in tree.selects:
+            for node in select_expr.walk():
+                if isinstance(node, exp.Column):
+                    if node.find_ancestor(exp.Window) is not None:
+                        continue
+                    if node.find_ancestor(exp.Select) != tree:
+                        continue
+                    if node in agg_subtrees:
+                        continue
+                    col_sql = node.sql().lower()
+                    if col_sql not in seen:
+                        seen.add(col_sql)
+                        missing_to_group.append(node)
 
         if missing_to_group:
             for col_node in missing_to_group:

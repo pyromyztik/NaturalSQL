@@ -52,6 +52,18 @@ export default function PromptDock({
 
   return (
     <div className={`w-full max-w-2xl mx-auto px-4 ${isCentered ? 'my-auto py-12' : 'pb-6 pt-2'}`}>
+      {/* Claude-style Hero Header over Chatbox */}
+      {isCentered && (
+        <div className="mb-8 flex flex-col items-center justify-center text-center animate-fade-in select-none">
+          <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight text-[#f1f3f4]">
+            NaturalSQL 
+          </h1>
+          <p className="text-xs sm:text-sm text-[#9aa0a6] mt-2 font-normal">
+            Query and interact with your database in natural English
+          </p>
+        </div>
+      )}
+
       {/* Main Clean Input Box */}
       <div className="bg-[#1e1f20] border border-[#2e2f32] rounded-2xl p-3 shadow-lg focus-within:border-[#3c4043] transition-colors">
         <textarea
@@ -59,7 +71,7 @@ export default function PromptDock({
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask a question in natural English..."
+          placeholder="Ask any question regarding your database..."
           disabled={isStreaming}
           rows={isCentered ? 2 : 1}
           className="w-full bg-transparent text-[#e3e3e3] placeholder-[#5f6368] text-sm outline-none resize-none leading-relaxed font-sans"

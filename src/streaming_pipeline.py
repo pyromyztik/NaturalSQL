@@ -32,7 +32,10 @@ class StreamingPipeline:
         self,
         question: str,
         execute: bool = True,
-        max_retries: int = config.MAX_SURGICAL_RETRIES
+        max_retries: int = config.MAX_SURGICAL_RETRIES,
+        failed_sql: Optional[str] = None,
+        error_feedback: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None
     ) -> AsyncGenerator[str, None]:
         schema_text = self.catalog.to_prompt_schema(self.dialect)
         t_start = time.time()
@@ -51,20 +54,34 @@ class StreamingPipeline:
             "question": question,
             "dialect": self.dialect,
             "model": self.generator.model,
+            "is_retry": bool(error_feedback),
             "timestamp": time.time()
         })
 
-        yield make_log("=== [NaturalSQL Pipeline Initialized] ===")
-        yield make_log(f"Question: \"{question}\"")
-        yield make_log(f"Target Database: {self.dialect.upper()} | Model: {self.generator.model}")
-        yield make_log(f"Catalog Tables: {', '.join(self.catalog.table_names) if self.catalog.table_names else 'None (Empty Database)'}")
-        yield make_log(f"\n[1/4] Querying LLM ({self.generator.model})...")
+        if error_feedback:
+            yield make_log("=== [NaturalSQL Retry: Bundled Failure Context] ===")
+            yield make_log(f"Question: \"{question}\"")
+            yield make_log(f"Previous Error: {error_feedback}")
+            if failed_sql:
+                yield make_log(f"Failed SQL:\n{failed_sql}")
+            if history:
+                yield make_log(f"Context: {len(history)} recent interaction(s) bundled for reference")
+            yield make_log(f"Target Database: {self.dialect.upper()} | Model: {self.generator.model}")
+            yield make_log(f"\n[1/4] Querying LLM with repair context ({self.generator.model})...")
+        else:
+            yield make_log("=== [NaturalSQL Pipeline Initialized] ===")
+            yield make_log(f"Question: \"{question}\"")
+            if history:
+                yield make_log(f"Context: {len(history)} recent interaction(s) bundled for reference")
+            yield make_log(f"Target Database: {self.dialect.upper()} | Model: {self.generator.model}")
+            yield make_log(f"Catalog Tables: {', '.join(self.catalog.table_names) if self.catalog.table_names else 'None (Empty Database)'}")
+            yield make_log(f"\n[1/4] Querying LLM ({self.generator.model})...")
 
         yield json.dumps({
             "type": "step_start",
             "step": "generation",
-            "title": "LLM Generation",
-            "message": f"Prompting {self.generator.model}...",
+            "title": "LLM Repair Generation" if error_feedback else "LLM Generation",
+            "message": f"Prompting {self.generator.model} with error context..." if error_feedback else f"Prompting {self.generator.model}...",
             "timestamp": time.time()
         })
 
@@ -76,7 +93,20 @@ class StreamingPipeline:
 
         def stream_worker():
             try:
-                gen = self.generator.generate_stream(user_question=question, schema_text=schema_text)
+                if error_feedback and failed_sql:
+                    gen = self.generator.generate_repair_stream(
+                        user_question=question,
+                        schema_text=schema_text,
+                        failed_sql=failed_sql,
+                        surgical_feedback=error_feedback,
+                        history=history
+                    )
+                elif error_feedback:
+                    augmented = f"{question}\n\n[Previous attempt failed with error: {error_feedback}. Please ensure the query resolves this.]"
+                    gen = self.generator.generate_stream(user_question=augmented, schema_text=schema_text, history=history)
+                else:
+                    gen = self.generator.generate_stream(user_question=question, schema_text=schema_text, history=history)
+
                 while True:
                     try:
                         token_item = next(gen)

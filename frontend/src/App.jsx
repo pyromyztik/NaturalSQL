@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AlertTriangle, RotateCcw, ShieldAlert, Check, X } from 'lucide-react';
+import { AlertTriangle, RotateCcw, ShieldAlert, Check, X, Database } from 'lucide-react';
 
 import Navbar from './components/Navbar';
 import TerminalView from './components/TerminalView';
@@ -14,6 +14,7 @@ import remarkGfm from 'remark-gfm';
 const ChatMessageItem = React.memo(function ChatMessageItem({
   msg,
   isStreaming,
+  isExecuting,
   onRetry,
   onExecuteManualSQL,
   onApproveMutation,
@@ -23,8 +24,21 @@ const ChatMessageItem = React.memo(function ChatMessageItem({
   if (msg.role === 'user') {
     return (
       <div id={`msg-${msg.id}`} className="flex justify-end animate-slide-up scroll-mt-20">
-        <div className="max-w-xl px-4 py-2.5 rounded-2xl bg-[#28292a] border border-[#343538] text-[#e3e3e3] text-sm shadow-md">
-          {msg.text}
+        <div className="max-w-xl px-4 py-2.5 rounded-2xl bg-[#28292a] border border-[#343538] text-[#e3e3e3] text-sm shadow-md space-y-2">
+          <div>{msg.text}</div>
+          {msg.retryContext && (
+            <div className="pt-2 border-t border-[#3c4043] text-xs font-mono space-y-1">
+              <div className="flex items-center gap-1.5 text-amber-400 font-sans font-medium text-[11px]">
+                <RotateCcw className="w-3 h-3" />
+                <span>Bundled Failure Context on Retry</span>
+              </div>
+              {msg.retryContext.errorFeedback && (
+                <div className="text-[#fca5a5] text-[11px] truncate bg-[#1e1515] px-2 py-1 rounded border border-[#4a2424]" title={msg.retryContext.errorFeedback}>
+                  Error: {msg.retryContext.errorFeedback}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -37,7 +51,7 @@ const ChatMessageItem = React.memo(function ChatMessageItem({
         logs={msg.logs}
         streamTokens={msg.streamTokens}
         thinking={msg.thinking || msg.streamTokens?.thinking}
-        isStreaming={msg.status === 'streaming'}
+        isStreaming={isStreaming && msg.status === 'streaming'}
         attempts={msg.attempts}
         totalDurationMs={msg.totalDurationMs}
       />
@@ -115,6 +129,7 @@ const ChatMessageItem = React.memo(function ChatMessageItem({
       {msg.finalSql && (
         <SQLViewer
           sql={msg.finalSql}
+          isRunning={isExecuting}
           onRun={(sqlToRun) => onExecuteManualSQL(msg.id, sqlToRun)}
         />
       )}
@@ -170,38 +185,37 @@ const ChatMessageItem = React.memo(function ChatMessageItem({
         </div>
       )}
 
-      {/* Execution Results Data Grid */}
-      {msg.execution && (
+      {/* Execution Results Data Grid (successful queries only) */}
+      {msg.execution && !msg.execution.error && (
         <DataTable
           columns={msg.execution.columns || []}
           rows={msg.execution.rows || []}
           rowCount={msg.execution.row_count ?? msg.execution.rowCount ?? 0}
           durationMs={msg.execution.duration_ms ?? msg.execution.durationMs ?? 0}
-          error={msg.execution.error}
         />
       )}
 
-      {/* Error state with Retry Option */}
+      {/* Unified Error State with Retry Option */}
       {(msg.error || msg.execution?.error) && (
-        <div className="rounded-xl border border-[#4a2424] bg-[#1e1515] p-3 text-xs text-[#fca5a5] flex items-center justify-between">
-          <div className="space-y-1">
+        <div className="rounded-xl border border-[#4a2424] bg-[#1e1515] p-3 text-xs text-[#fca5a5] flex items-center justify-between animate-fade-in">
+          <div className="space-y-1 pr-2 overflow-hidden">
             <div className="flex items-center gap-1.5 font-semibold">
-              <AlertTriangle className="w-3.5 h-3.5" />
-              <span>Execution / Compilation Issue</span>
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>{msg.execution?.error ? "Execution Error" : "Compilation Issue"}</span>
             </div>
-            <p className="font-mono text-[11px] text-[#fca5a5]/90">
+            <p className="font-mono text-[11px] text-[#fca5a5]/90 wrap-break-word whitespace-pre-wrap">
               {msg.error || msg.execution?.error}
             </p>
           </div>
 
           <button
-            onClick={() => onRetry(msg.question)}
+            onClick={() => onRetry(msg)}
             disabled={isStreaming}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[#28292a] hover:bg-[#343538] border border-[#3c4043] text-[#e3e3e3] font-mono text-xs transition-colors shrink-0 ml-3 disabled:opacity-50 cursor-pointer"
-            title="Retry this query"
+            title="Retry with bundled error context"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>Retry</span>
+            <span>Retry with Error Context</span>
           </button>
         </div>
       )}
@@ -219,19 +233,41 @@ export default function App() {
   const [schemaDrawerOpen, setSchemaDrawerOpen] = useState(false);
   const [connectionModalOpen, setConnectionModalOpen] = useState(false);
   
+  const [executingMsgId, setExecutingMsgId] = useState(null);
+  
   const abortControllerRef = useRef(null);
   const chatBottomRef = useRef(null);
 
-  const scrollToMessage = (msgId, smooth = true) => {
-    requestAnimationFrame(() => {
+  const scrollToBottom = (smooth = true) => {
+    const doScroll = () => {
+      if (chatBottomRef.current) {
+        chatBottomRef.current.scrollIntoView({
+          behavior: smooth ? 'smooth' : 'auto',
+          block: 'end'
+        });
+      } else {
+        window.scrollTo({
+          top: document.documentElement.scrollHeight,
+          behavior: smooth ? 'smooth' : 'auto'
+        });
+      }
+    };
+    doScroll();
+    setTimeout(doScroll, 80);
+  };
+
+  const scrollToMessage = (msgId, smooth = true, block = 'start') => {
+    const doScroll = () => {
       const el = document.getElementById(`msg-${msgId}`);
       if (el) {
         el.scrollIntoView({
           behavior: smooth ? 'smooth' : 'auto',
-          block: 'start'
+          block: block
         });
       }
-    });
+    };
+    doScroll();
+    setTimeout(doScroll, 80);
   };
 
   const loadCatalogs = async (newActiveId = null) => {
@@ -262,7 +298,7 @@ export default function App() {
 
   const activeCatalog = catalogs.find(c => c.id === selectedCatalogId) || catalogs[0];
 
-  const handleSubmit = async (textToSend = null) => {
+  const handleSubmit = async (textToSend = null, retryContext = null) => {
     const query = (textToSend || prompt).trim();
     if (!query || isStreaming) return;
 
@@ -286,7 +322,8 @@ export default function App() {
       {
         id: userMessageId,
         role: 'user',
-        text: query,
+        text: retryContext ? `Retry: ${query}` : query,
+        retryContext: retryContext,
         timestamp: Date.now()
       },
       {
@@ -313,6 +350,16 @@ export default function App() {
 
     abortControllerRef.current = new AbortController();
 
+    // Compact recent context (strictly last 2 assistant turns) to keep VRAM low on 8GB VRAM systems
+    const recentHistory = messages
+      .filter(m => m.role === 'assistant' && (m.finalSql || m.responseText))
+      .slice(-2)
+      .map(m => ({
+        question: m.question,
+        sql: m.finalSql || null,
+        response: m.responseText ? m.responseText.slice(0, 150) : null
+      }));
+
     try {
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
@@ -320,7 +367,10 @@ export default function App() {
         body: JSON.stringify({
           question: query,
           catalog_id: selectedCatalogId || (activeCatalog?.id || ''),
-          execute: true
+          execute: true,
+          failed_sql: retryContext?.failedSql || null,
+          error_feedback: retryContext?.errorFeedback || null,
+          history: recentHistory.length > 0 ? recentHistory : null
         }),
         signal: abortControllerRef.current.signal
       });
@@ -372,7 +422,18 @@ export default function App() {
         }
       }
     } catch (err) {
-      if (err.name !== 'AbortError') {
+      if (err.name === 'AbortError') {
+        setMessages(prev => prev.map(msg => {
+          if (msg.id === assistantMessageId) {
+            return {
+              ...msg,
+              status: 'stopped',
+              logs: [...(msg.logs || []), '[User] Generation stopped by user.']
+            };
+          }
+          return msg;
+        }));
+      } else {
         console.error("Stream error:", err);
         setMessages(prev => prev.map(msg => {
           if (msg.id === assistantMessageId) {
@@ -439,7 +500,7 @@ export default function App() {
           updated.attempts = event.attempts || 1;
           updated.isMutation = event.is_mutation;
           updated.mutationType = event.mutation_type;
-          scrollToMessage(msgId, true);
+          scrollToBottom(true);
           break;
 
         case 'approval_required':
@@ -447,12 +508,12 @@ export default function App() {
           updated.isMutation = true;
           updated.mutationType = event.mutation_type;
           updated.finalSql = event.final_sql || updated.finalSql;
-          scrollToMessage(msgId, true);
+          scrollToBottom(true);
           break;
 
         case 'direct_response':
           updated.responseText = event.text;
-          scrollToMessage(msgId, true);
+          scrollToBottom(true);
           break;
 
         case 'pipeline_complete':
@@ -471,9 +532,9 @@ export default function App() {
           updated.totalDurationMs = event.total_duration_ms;
           if (event.response_text) {
             updated.responseText = event.response_text;
-            scrollToMessage(msgId, true);
           }
           if (event.logs) updated.logs = event.logs;
+          scrollToBottom(true);
           break;
 
         case 'pipeline_failed':
@@ -481,11 +542,13 @@ export default function App() {
           updated.error = event.error;
           updated.totalDurationMs = event.total_duration_ms;
           if (event.logs) updated.logs = event.logs;
+          scrollToBottom(true);
           break;
 
         case 'error':
           updated.status = 'error';
           updated.error = event.message;
+          scrollToBottom(true);
           break;
 
         default:
@@ -499,8 +562,19 @@ export default function App() {
   const handleStop = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
-      setIsStreaming(false);
+      abortControllerRef.current = null;
     }
+    setIsStreaming(false);
+    setMessages(prev => prev.map(msg => {
+      if (msg.status === 'streaming') {
+        return {
+          ...msg,
+          status: 'stopped',
+          logs: [...(msg.logs || []), '[User] Generation stopped by user.']
+        };
+      }
+      return msg;
+    }));
   };
 
   const handleClearChat = () => {
@@ -508,6 +582,8 @@ export default function App() {
   };
 
   const handleExecuteManualSQL = async (msgId, sqlToRun) => {
+    scrollToBottom(true);
+    setExecutingMsgId(msgId);
     try {
       const res = await fetch('/api/execute-sql', {
         method: 'POST',
@@ -531,12 +607,17 @@ export default function App() {
         }
         return msg;
       }));
+      scrollToBottom(true);
     } catch (err) {
       console.error("Manual execution error:", err);
+      scrollToBottom(true);
+    } finally {
+      setExecutingMsgId(null);
     }
   };
 
   const handleApproveMutation = async (msgId, sqlToRun) => {
+    scrollToBottom(true);
     try {
       const res = await fetch('/api/execute-sql', {
         method: 'POST',
@@ -559,8 +640,10 @@ export default function App() {
         }
         return msg;
       }));
+      scrollToBottom(true);
     } catch (err) {
       console.error("Approve mutation error:", err);
+      scrollToBottom(true);
     }
   };
 
@@ -575,6 +658,13 @@ export default function App() {
       }
       return msg;
     }));
+    scrollToBottom(true);
+  };
+
+  const handleRetry = (failedMsg) => {
+    const failedSql = failedMsg.finalSql || failedMsg.initialSql || '';
+    const errorFeedback = failedMsg.execution?.error || failedMsg.error || '';
+    handleSubmit(failedMsg.question, { failedSql, errorFeedback });
   };
 
   const handleForgetAllDatabases = async () => {
@@ -607,13 +697,13 @@ export default function App() {
         {messages.length === 0 ? (
           /* Empty / Initial State */
           catalogs.length === 0 ? (
-            <div className="flex-1 flex flex-col items-center justify-center my-auto w-full text-center max-w-md mx-auto space-y-4 animate-fade-in">
-              <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mx-auto text-emerald-400">
-                <ShieldAlert className="w-6 h-6" />
+            <div className="flex-1 flex flex-col items-center justify-center my-auto w-full text-center max-w-md mx-auto space-y-4 animate-fade-in select-none">
+              <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center mx-auto text-emerald-400 shadow-lg shadow-emerald-950/20">
+                <Database className="w-6 h-6" />
               </div>
               <div className="space-y-1">
-                <h2 className="text-base font-semibold text-[#e3e3e3]">No Database Connected</h2>
-                <p className="text-xs text-[#9aa0a6] leading-relaxed">
+                <h1 className="text-3xl font-semibold tracking-tight text-[#f1f3f4]">NaturalSQL</h1>
+                <p className="text-xs text-[#9aa0a6] leading-relaxed pt-1">
                   Connect your Oracle, PostgreSQL, or MySQL database to begin querying, inserting, or modifying data in natural English.
                 </p>
               </div>
@@ -651,7 +741,8 @@ export default function App() {
                 key={msg.id}
                 msg={msg}
                 isStreaming={isStreaming && msg.status === 'streaming'}
-                onRetry={(q) => handleSubmit(q)}
+                isExecuting={executingMsgId === msg.id}
+                onRetry={handleRetry}
                 onExecuteManualSQL={handleExecuteManualSQL}
                 onApproveMutation={handleApproveMutation}
                 onRejectMutation={handleRejectMutation}

@@ -131,10 +131,25 @@ def parse_connection_input(raw: str) -> Dict[str, Any]:
         "- MySQL: mysql://user:password@localhost:3306/dbname"
     )
 
+def get_engine_connect_args(engine_url: str, timeout: int = 4) -> Dict[str, Any]:
+    """
+    Returns driver-specific connection timeout arguments so offline/unreachable
+    databases fail fast (within seconds) rather than blocking the application for minutes.
+    """
+    url_lower = engine_url.lower()
+    if "oracle" in url_lower:
+        return {"tcp_connect_timeout": float(timeout)}
+    elif "postgres" in url_lower or "mysql" in url_lower:
+        return {"connect_timeout": int(timeout)}
+    elif "sqlite" in url_lower:
+        return {"timeout": float(timeout)}
+    return {}
+
 def test_connection(connection_url: str) -> Dict[str, Any]:
     """Attempts to connect and count tables using SQLAlchemy."""
     info = parse_connection_input(connection_url)
-    engine = create_engine(info["engine_url"], pool_pre_ping=True)
+    connect_args = get_engine_connect_args(info["engine_url"], timeout=4)
+    engine = create_engine(info["engine_url"], pool_pre_ping=True, connect_args=connect_args)
     try:
         with engine.connect() as conn:
             insp = inspect(engine)
@@ -161,7 +176,8 @@ def introspect_connection(engine_url: str, max_sample_values: int = 5) -> Tuple[
     Universally introspects any connected relational database into DatabaseCatalog
     using SQLAlchemy inspect. Works across Oracle, PostgreSQL, MySQL, and SQLite.
     """
-    engine = create_engine(engine_url, pool_pre_ping=True)
+    connect_args = get_engine_connect_args(engine_url, timeout=4)
+    engine = create_engine(engine_url, pool_pre_ping=True, connect_args=connect_args)
     inspector = inspect(engine)
     dialect_name = engine.dialect.name
     
@@ -340,7 +356,8 @@ def execute_sql_query(engine_url: str, sql: str, is_mutation: bool = False) -> D
     - Handles DML/DDL (INSERT/UPDATE/DELETE/ALTER/CREATE) with commit and rows_affected
     """
     t0 = time.time()
-    engine = create_engine(engine_url, pool_pre_ping=True)
+    connect_args = get_engine_connect_args(engine_url, timeout=5)
+    engine = create_engine(engine_url, pool_pre_ping=True, connect_args=connect_args)
     try:
         dialect_name = engine.dialect.name.lower()
         statements = split_sql_statements(sql, dialect=dialect_name)

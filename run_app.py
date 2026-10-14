@@ -37,7 +37,15 @@ def main():
     print("[App] Press Ctrl+C to stop.\n")
 
     def open_browser():
-        time.sleep(1.2)
+        # Wait for the server to be actively accepting connections before opening browser
+        import urllib.request
+        for _ in range(50):
+            try:
+                with urllib.request.urlopen(f"{url}/api/health", timeout=1) as resp:
+                    if resp.status == 200:
+                        break
+            except Exception:
+                time.sleep(0.25)
         try:
             webbrowser.open(url)
         except Exception:

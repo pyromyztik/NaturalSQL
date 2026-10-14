@@ -60,7 +60,7 @@ export default function HealerVisualizer({ healerIterations = [], patchesApplied
             >
               <button
                 onClick={() => setExpandedIter(isExpanded ? -1 : idx)}
-                className="w-full flex items-center justify-between p-3 bg-white/[0.02] hover:bg-white/[0.05] transition-colors text-left"
+                className="w-full flex items-center justify-between p-3 bg-white/2 hover:bg-white/5 transition-colors text-left"
               >
                 <div className="flex items-center gap-2.5">
                   <span className="flex items-center justify-center w-5 h-5 rounded-full bg-rose-500/20 text-rose-300 font-bold text-[10px] border border-rose-500/30">
@@ -85,7 +85,7 @@ export default function HealerVisualizer({ healerIterations = [], patchesApplied
               {isExpanded && (
                 <div className="p-3.5 border-t border-white/5 space-y-3 text-xs">
                   {/* Ping-pong step diagram */}
-                  <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.02] border border-white/5 text-[11px]">
+                  <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-white/2 border border-white/5 text-[11px]">
                     <div className="flex items-center gap-1.5 text-slate-300 font-medium">
                       <Cpu className="w-3.5 h-3.5 text-indigo-400" />
                       <span>1. LLM Generation</span>

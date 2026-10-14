@@ -22,7 +22,88 @@ from src.generator import LLMGenerator
 from src.streaming_pipeline import StreamingPipeline
 from src import config
 
-app = FastAPI(title="NaturalSQL Universal", version="2.0.0")
+import asyncio
+from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
+
+executor = ThreadPoolExecutor(max_workers=4)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+connection_registry = ConnectionRegistry()
+
+# In-memory cache of introspected catalogs: { conn_id: { ... } }
+CATALOGS: Dict[str, Dict[str, Any]] = {}
+
+def init_catalogs():
+    """Initializes in-memory catalog metadata instantly from registry without blocking network I/O."""
+    global CATALOGS
+    saved_conns = connection_registry.load()
+    for conn_id, meta in saved_conns.items():
+        engine_url = meta.get("engine_url", "")
+        CATALOGS[conn_id] = {
+            "id": conn_id,
+            "name": meta.get("name", conn_id.title()),
+            "dialect": meta.get("dialect", "unknown"),
+            "engine_url": engine_url,
+            "display_url": meta.get("display_url", engine_url),
+            "connection_input": meta.get("connection_input", ""),
+            "catalog": DatabaseCatalog(),
+            "status": "connecting",
+            "error": None,
+            "created_at": meta.get("created_at", time.time())
+        }
+
+def introspect_single_catalog(conn_id: str, meta: Dict[str, Any]):
+    engine_url = meta.get("engine_url")
+    if not engine_url:
+        return
+    try:
+        cat, dialect = introspect_connection(engine_url)
+        CATALOGS[conn_id] = {
+            "id": conn_id,
+            "name": meta.get("name", conn_id.title()),
+            "dialect": dialect,
+            "engine_url": engine_url,
+            "display_url": meta.get("display_url", engine_url),
+            "connection_input": meta.get("connection_input", ""),
+            "catalog": cat,
+            "status": "online",
+            "error": None,
+            "created_at": meta.get("created_at", time.time())
+        }
+        print(f"[Database] Successfully connected & introspected '{conn_id}' ({dialect.upper()}) with {len(cat.table_names)} tables.")
+    except Exception as e:
+        print(f"[Warning] Failed to introspect connection '{conn_id}': {e}")
+        CATALOGS[conn_id] = {
+            "id": conn_id,
+            "name": meta.get("name", conn_id.title()),
+            "dialect": meta.get("dialect", "unknown"),
+            "engine_url": engine_url,
+            "display_url": meta.get("display_url", engine_url),
+            "connection_input": meta.get("connection_input", ""),
+            "catalog": DatabaseCatalog(),
+            "status": "offline",
+            "error": str(e),
+            "created_at": meta.get("created_at", time.time())
+        }
+
+def refresh_catalogs_async():
+    """Introspects all saved connections concurrently in worker threads."""
+    saved_conns = connection_registry.load()
+    for conn_id, meta in saved_conns.items():
+        executor.submit(introspect_single_catalog, conn_id, meta)
+
+# Initialize metadata immediately so server starts in milliseconds
+init_catalogs()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Concurrently introspect saved connections in background without delaying server start
+    refresh_catalogs_async()
+    yield
+    executor.shutdown(wait=False)
+
+app = FastAPI(title="NaturalSQL Universal", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,53 +112,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-connection_registry = ConnectionRegistry()
-
-# In-memory cache of introspected catalogs: { conn_id: { ... } }
-CATALOGS: Dict[str, Dict[str, Any]] = {}
-
-def refresh_catalogs():
-    """Introspects and caches all saved connections in the registry."""
-    global CATALOGS
-    saved_conns = connection_registry.load()
-    new_catalogs = {}
-
-    for conn_id, meta in saved_conns.items():
-        engine_url = meta.get("engine_url")
-        if not engine_url:
-            continue
-        try:
-            cat, dialect = introspect_connection(engine_url)
-            new_catalogs[conn_id] = {
-                "id": conn_id,
-                "name": meta.get("name", conn_id.title()),
-                "dialect": dialect,
-                "engine_url": engine_url,
-                "display_url": meta.get("display_url", engine_url),
-                "connection_input": meta.get("connection_input", ""),
-                "catalog": cat,
-                "created_at": meta.get("created_at", time.time())
-            }
-        except Exception as e:
-            print(f"[Warning] Failed to introspect connection '{conn_id}': {e}")
-            # Still keep an entry with empty catalog so user can see/fix/delete it
-            new_catalogs[conn_id] = {
-                "id": conn_id,
-                "name": meta.get("name", conn_id.title()),
-                "dialect": meta.get("dialect", "unknown"),
-                "engine_url": engine_url,
-                "display_url": meta.get("display_url", engine_url),
-                "connection_input": meta.get("connection_input", ""),
-                "catalog": DatabaseCatalog(),
-                "error": str(e),
-                "created_at": meta.get("created_at", time.time())
-            }
-
-    CATALOGS = new_catalogs
-
-refresh_catalogs()
 
 class QueryRequest(BaseModel):
     question: str
@@ -100,7 +134,7 @@ class AddConnectionRequest(BaseModel):
     connection_string: str
 
 def format_catalog_response(info: Dict[str, Any]) -> Dict[str, Any]:
-    cat: DatabaseCatalog = info["catalog"]
+    cat: DatabaseCatalog = info.get("catalog") or DatabaseCatalog()
     tables_data = []
     for tbl_name in cat.table_names:
         tbl = cat.get_table(tbl_name)
@@ -121,6 +155,10 @@ def format_catalog_response(info: Dict[str, Any]) -> Dict[str, Any]:
             "columns": cols_data
         })
 
+    status = info.get("status")
+    if not status:
+        status = "offline" if info.get("error") else ("online" if tables_data else "connecting")
+
     return {
         "id": info["id"],
         "name": info["name"],
@@ -128,6 +166,7 @@ def format_catalog_response(info: Dict[str, Any]) -> Dict[str, Any]:
         "display_url": info.get("display_url", ""),
         "connection_input": info.get("connection_input", ""),
         "tables": tables_data,
+        "status": status,
         "error": info.get("error"),
         "created_at": info.get("created_at")
     }
@@ -144,7 +183,17 @@ async def health():
 
 @app.get("/api/catalogs")
 @app.get("/api/connections")
-async def get_connections():
+async def get_connections(check: bool = False):
+    if check:
+        saved_conns = connection_registry.load()
+        loop = asyncio.get_running_loop()
+        futures = [
+            loop.run_in_executor(executor, introspect_single_catalog, conn_id, meta)
+            for conn_id, meta in saved_conns.items()
+        ]
+        if futures:
+            await asyncio.gather(*futures)
+
     response = []
     for cat_id, info in CATALOGS.items():
         response.append(format_catalog_response(info))
@@ -207,15 +256,49 @@ async def delete_connection(connection_id: str):
         
     return {"success": True, "message": f"Connection '{connection_id}' removed."}
 
+@app.post("/api/connections/{connection_id}/refresh")
+async def refresh_single_connection(connection_id: str):
+    saved_conns = connection_registry.load()
+    meta = saved_conns.get(connection_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Connection not found.")
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(executor, introspect_single_catalog, connection_id, meta)
+
+    info = CATALOGS.get(connection_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Connection not found after refresh.")
+
+    return {
+        "success": info.get("status") == "online",
+        "message": f"Successfully connected to '{info.get('name')}'." if info.get("status") == "online" else f"Connection failed: {info.get('error')}",
+        "catalog": format_catalog_response(info)
+    }
+
+@app.post("/api/connections/refresh")
+async def refresh_all_connections():
+    refresh_catalogs_async()
+    return {"success": True, "message": "Refreshing all connections in background."}
+
 @app.post("/api/chat/stream")
 async def chat_stream(request: QueryRequest):
     cat_info = CATALOGS.get(request.catalog_id)
     if not cat_info:
-        # If catalog_id not found, pick first available connection
-        if CATALOGS:
+        # If catalog_id not found, pick first online connection if available, else first connection
+        online_conns = [c for c in CATALOGS.values() if not c.get("error") and c.get("status") == "online"]
+        if online_conns:
+            cat_info = online_conns[0]
+        elif CATALOGS:
             cat_info = next(iter(CATALOGS.values()))
         else:
             raise HTTPException(status_code=400, detail="No active database connections configured. Please connect a database first.")
+
+    if cat_info.get("status") == "offline" or cat_info.get("error"):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database '{cat_info.get('name')}' is currently offline/unreachable: {cat_info.get('error')}. Please verify the database is running or switch to an online connection."
+        )
 
     pipeline = StreamingPipeline(
         catalog=cat_info["catalog"],
@@ -243,6 +326,12 @@ async def execute_manual_sql(request: ExecuteSQLRequest):
     cat_info = CATALOGS.get(request.catalog_id)
     if not cat_info:
         raise HTTPException(status_code=404, detail="Database connection not found.")
+
+    if cat_info.get("status") == "offline" or cat_info.get("error"):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database '{cat_info.get('name')}' is currently offline/unreachable: {cat_info.get('error')}. Please verify the database is running or switch to an online connection."
+        )
 
     engine_url = cat_info.get("engine_url")
     if not engine_url:

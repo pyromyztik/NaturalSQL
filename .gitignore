@@ -11,3 +11,5 @@ venv/
 
 benchmark/
 db/connections.json
+*.docx
+report/

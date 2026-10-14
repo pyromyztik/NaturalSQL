@@ -109,7 +109,7 @@ export default function TerminalView({
         <div 
           ref={terminalBoxRef}
           onScroll={handleTerminalScroll}
-          className="p-3.5 bg-[#0e0f10] text-xs font-mono text-[#d1d5db] overflow-y-auto max-h-80 leading-relaxed animate-fade-in"
+          className="p-3.5 bg-[#0e0f10] text-xs font-mono text-[#d1d5db] overflow-y-auto max-h-90 leading-relaxed animate-fade-in"
         >
           <div className="space-y-1">
             {logs && logs.map((line, idx) => {

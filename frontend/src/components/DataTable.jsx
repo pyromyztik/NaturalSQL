@@ -164,7 +164,7 @@ export default function DataTable({
       </div>
 
       {/* Grid container */}
-      <div className="overflow-x-auto max-h-80">
+      <div className="overflow-x-auto max-h-96">
         <table className="w-full text-left text-xs text-[#d1d5db]">
           <thead className="bg-[#1e1f20] text-[#9aa0a6] uppercase text-[10px] tracking-wider sticky top-0 z-10 border-b border-[#2e2f32]">
             <tr>

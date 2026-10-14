@@ -27,7 +27,7 @@ export default function PipelineReasoning({
       {/* Header bar */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-white/[0.02] hover:bg-white/[0.04] transition-colors border-b border-white/5 text-left"
+        className="w-full flex items-center justify-between px-4 py-3 bg-white/2 hover:bg-white/4 transition-colors border-b border-white/5 text-left"
       >
         <div className="flex items-center gap-3">
           {isStreaming ? (
@@ -78,7 +78,7 @@ export default function PipelineReasoning({
           {/* Timeline Nodes */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {/* Stage 1 */}
-            <div className="p-3 rounded-lg bg-white/[0.02] border border-white/5 space-y-1.5">
+            <div className="p-3 rounded-lg bg-white/2 border border-white/5 space-y-1.5">
               <div className="flex items-center justify-between text-slate-400">
                 <span className="font-semibold text-slate-300 flex items-center gap-1.5">
                   <Cpu className="w-3.5 h-3.5 text-indigo-400" />
@@ -95,7 +95,7 @@ export default function PipelineReasoning({
             <div className={`p-3 rounded-lg border space-y-1.5 ${
               hasHealer 
                 ? "bg-amber-500/5 border-amber-500/20" 
-                : "bg-white/[0.02] border-white/5"
+                : "bg-white/2 border-white/5"
             }`}>
               <div className="flex items-center justify-between text-slate-400">
                 <span className="font-semibold text-slate-300 flex items-center gap-1.5">
@@ -119,7 +119,7 @@ export default function PipelineReasoning({
             <div className={`p-3 rounded-lg border space-y-1.5 ${
               hasPatches 
                 ? "bg-indigo-500/5 border-indigo-500/20" 
-                : "bg-white/[0.02] border-white/5"
+                : "bg-white/2 border-white/5"
             }`}>
               <div className="flex items-center justify-between text-slate-400">
                 <span className="font-semibold text-slate-300 flex items-center gap-1.5">

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   X, Database, Check, Trash2, AlertCircle, 
-  Loader2, Plus, Plug, ShieldCheck, Unplug 
+  Loader2, Plus, Plug, ShieldCheck, Unplug, RotateCcw 
 } from 'lucide-react';
 
 export default function DatabaseConnectionModal({
@@ -11,7 +11,9 @@ export default function DatabaseConnectionModal({
   activeCatalogId,
   onSelectCatalog,
   onCatalogsUpdated,
-  onForgetAllDatabases
+  onForgetAllDatabases,
+  onReconnect,
+  reconnectingId
 }) {
   const [activeTab, setActiveTab] = useState('connect'); // 'connect' | 'manage'
   const [connectionString, setConnectionString] = useState('');
@@ -336,39 +338,83 @@ export default function DatabaseConnectionModal({
                 <>
                   {catalogs.map((cat) => {
                     const isActive = cat.id === activeCatalogId;
+                    const isOffline = Boolean(cat.error || cat.status === 'offline');
+                    const isConnecting = cat.status === 'connecting';
                     const tableCount = cat.tables?.length || 0;
                     return (
                       <div
                         key={cat.id}
                         onClick={() => {
+                          if (isOffline || isConnecting) return;
                           if (onSelectCatalog) onSelectCatalog(cat.id);
                           onClose();
                         }}
-                        className={`p-3.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between group ${
-                          isActive
-                            ? 'bg-[#1e2320] border-emerald-500/50 shadow-md'
-                            : 'bg-[#151618] border-[#2e2f32] hover:border-[#3c4043] hover:bg-[#1a1b1e]'
+                        className={`p-3.5 rounded-xl border transition-all flex items-center justify-between group ${
+                          isOffline
+                            ? 'bg-[#151618]/50 border-[#2e2f32]/60 opacity-60 cursor-not-allowed'
+                            : isConnecting
+                              ? 'bg-[#151618] border-[#2e2f32] opacity-80 cursor-wait'
+                              : isActive
+                                ? 'bg-[#1e2320] border-emerald-500/50 shadow-md cursor-pointer'
+                                : 'bg-[#151618] border-[#2e2f32] hover:border-[#3c4043] hover:bg-[#1a1b1e] cursor-pointer'
                         }`}
                       >
-                        <div className="space-y-1">
+                        <div className="space-y-1 overflow-hidden mr-2">
                           <div className="flex items-center gap-2">
-                            <span className="text-xs font-semibold text-[#e3e3e3]">{cat.name}</span>
+                            <span className={`text-xs font-semibold ${isOffline ? 'text-[#80868b]' : 'text-[#e3e3e3]'}`}>{cat.name}</span>
                             {getDialectBadge(cat.dialect)}
                             {isActive && (
                               <span className="text-[10px] font-medium text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.2 rounded-full">
                                 Active
                               </span>
                             )}
+                            {isOffline ? (
+                              <span className="text-[10px] font-medium text-red-400 bg-red-950/60 border border-red-800/60 px-1.5 py-0.2 rounded-full">
+                                Offline / Unreachable
+                              </span>
+                            ) : isConnecting ? (
+                              <span className="text-[10px] font-medium text-amber-400 bg-amber-950/60 border border-amber-800/60 px-1.5 py-0.2 rounded-full animate-pulse">
+                                Connecting...
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-medium text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-1.5 py-0.2 rounded-full">
+                                Online
+                              </span>
+                            )}
                           </div>
                           <div className="text-[11px] font-mono text-[#80868b] truncate max-w-sm">
                             {cat.display_url || cat.id}
                           </div>
-                          <div className="text-[11px] text-[#9aa0a6]">
-                            {tableCount} table(s) introspected: {cat.tables?.slice(0, 4).map(t => t.name).join(', ')}{tableCount > 4 ? '...' : ''}
-                          </div>
+                          {cat.error ? (
+                            <div className="text-[11px] text-[#fca5a5] font-mono truncate max-w-md" title={cat.error}>
+                              Error: {cat.error.split('\n')[0]}
+                            </div>
+                          ) : (
+                            <div className="text-[11px] text-[#9aa0a6]">
+                              {tableCount} table(s) introspected: {cat.tables?.slice(0, 4).map(t => t.name).join(', ')}{tableCount > 4 ? '...' : ''}
+                            </div>
+                          )}
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {onReconnect && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onReconnect(cat.id);
+                              }}
+                              disabled={reconnectingId === cat.id}
+                              title="Reconnect & re-introspect"
+                              className="p-1.5 text-[#9aa0a6] hover:text-[#e3e3e3] hover:bg-[#28292a] rounded-lg transition-colors cursor-pointer"
+                            >
+                              {reconnectingId === cat.id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                              ) : (
+                                <RotateCcw className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={(e) => handleDeleteConnection(cat.id, e)}

@@ -234,6 +234,7 @@ export default function App() {
   const [connectionModalOpen, setConnectionModalOpen] = useState(false);
   
   const [executingMsgId, setExecutingMsgId] = useState(null);
+  const [reconnectingId, setReconnectingId] = useState(null);
   
   const abortControllerRef = useRef(null);
   const chatBottomRef = useRef(null);
@@ -270,20 +271,49 @@ export default function App() {
     setTimeout(doScroll, 80);
   };
 
-  const loadCatalogs = async (newActiveId = null) => {
+  const loadCatalogs = async (newActiveId = null, forceCheck = false) => {
     try {
-      const res = await fetch('/api/catalogs');
+      const url = forceCheck ? '/api/catalogs?check=true' : '/api/catalogs';
+      const res = await fetch(url);
       const data = await res.json();
       setCatalogs(data);
       if (newActiveId) {
         setSelectedCatalogId(newActiveId);
       } else if (data.length > 0) {
-        setSelectedCatalogId(prev => (data.some(c => c.id === prev) ? prev : data[0].id));
+        setSelectedCatalogId(prev => {
+          // If previous selection is online, preserve it
+          const prevCat = data.find(c => c.id === prev);
+          if (prevCat && prevCat.status === 'online' && !prevCat.error) {
+            return prev;
+          }
+          // Otherwise, auto-select the first online database
+          const firstOnline = data.find(c => !c.error && c.status === 'online');
+          if (firstOnline) return firstOnline.id;
+          return prev || data[0].id;
+        });
       } else {
         setSelectedCatalogId('');
       }
+
+      // If any database is still checking/connecting, poll until all are resolved
+      if (data.some(c => c.status === 'connecting')) {
+        setTimeout(() => loadCatalogs(null, false), 1200);
+      }
     } catch (err) {
       console.error("Error loading catalogs:", err);
+    }
+  };
+
+  const handleReconnect = async (connId) => {
+    if (!connId || reconnectingId) return;
+    setReconnectingId(connId);
+    try {
+      const res = await fetch(`/api/connections/${connId}/refresh`, { method: 'POST' });
+      await loadCatalogs(connId);
+    } catch (err) {
+      console.error("Reconnect failed:", err);
+    } finally {
+      setReconnectingId(null);
     }
   };
 
@@ -294,9 +324,20 @@ export default function App() {
       .catch(err => console.error("Health check error:", err));
 
     loadCatalogs();
+
+    // Check databases periodically to keep online/offline statuses updated
+    const interval = setInterval(() => {
+      loadCatalogs();
+    }, 15000);
+
+    return () => clearInterval(interval);
   }, []);
 
-  const activeCatalog = catalogs.find(c => c.id === selectedCatalogId) || catalogs[0];
+  const activeCatalog = 
+    catalogs.find(c => c.id === selectedCatalogId && c.status === 'online' && !c.error)
+    || catalogs.find(c => !c.error && c.status === 'online')
+    || catalogs.find(c => c.id === selectedCatalogId)
+    || catalogs[0];
 
   const handleSubmit = async (textToSend = null, retryContext = null) => {
     const query = (textToSend || prompt).trim();
@@ -729,6 +770,8 @@ export default function App() {
                 onSelectCatalog={(id) => setSelectedCatalogId(id)}
                 onToggleSchema={() => setSchemaDrawerOpen(true)}
                 onOpenDatabaseModal={() => setConnectionModalOpen(true)}
+                onReconnect={handleReconnect}
+                reconnectingId={reconnectingId}
                 isCentered={true}
               />
             </div>
@@ -770,6 +813,8 @@ export default function App() {
             onSelectCatalog={(id) => setSelectedCatalogId(id)}
             onToggleSchema={() => setSchemaDrawerOpen(true)}
             onOpenDatabaseModal={() => setConnectionModalOpen(true)}
+            onReconnect={handleReconnect}
+            reconnectingId={reconnectingId}
             isCentered={false}
           />
         </footer>
@@ -782,6 +827,8 @@ export default function App() {
         catalog={activeCatalog}
         onSelectIdentifier={(id) => setPrompt(prev => prev ? `${prev} ${id}` : id)}
         onOpenDatabaseModal={() => setConnectionModalOpen(true)}
+        onReconnect={handleReconnect}
+        reconnectingId={reconnectingId}
       />
 
       {/* Live Database Connection Manager Modal */}
@@ -793,6 +840,8 @@ export default function App() {
         onSelectCatalog={(id) => setSelectedCatalogId(id)}
         onCatalogsUpdated={loadCatalogs}
         onForgetAllDatabases={handleForgetAllDatabases}
+        onReconnect={handleReconnect}
+        reconnectingId={reconnectingId}
       />
     </div>
   );

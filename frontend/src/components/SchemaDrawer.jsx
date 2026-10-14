@@ -1,7 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { X, Database, Key, Link2, ChevronRight, ChevronDown, Table2 } from 'lucide-react';
+import { X, Database, Key, Link2, ChevronRight, ChevronDown, Table2, AlertCircle, RotateCcw, Loader2 } from 'lucide-react';
 
-export default function SchemaDrawer({ isOpen, onClose, catalog = null, onSelectIdentifier, onOpenDatabaseModal }) {
+export default function SchemaDrawer({ 
+  isOpen, 
+  onClose, 
+  catalog = null, 
+  onSelectIdentifier, 
+  onOpenDatabaseModal,
+  onReconnect,
+  reconnectingId
+}) {
   const [expandedTables, setExpandedTables] = useState({});
 
   useEffect(() => {
@@ -27,6 +35,8 @@ export default function SchemaDrawer({ isOpen, onClose, catalog = null, onSelect
     }));
   };
 
+  const isOffline = Boolean(catalog.error || catalog.status === 'offline');
+
   return (
     <div 
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs animate-overlay"
@@ -47,8 +57,13 @@ export default function SchemaDrawer({ isOpen, onClose, catalog = null, onSelect
                 <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded-md bg-[#242528] border border-[#2e2f32] text-[#9aa0a6]">
                   {catalog.dialect}
                 </span>
+                {isOffline && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-red-950/60 border border-red-800/60 text-red-400">
+                    Offline
+                  </span>
+                )}
               </h3>
-              <p className="text-[11px] text-[#5f6368] mt-0.5">{catalog.description}</p>
+              <p className="text-[11px] text-[#5f6368] mt-0.5">{catalog.display_url || catalog.description}</p>
             </div>
           </div>
 
@@ -74,11 +89,40 @@ export default function SchemaDrawer({ isOpen, onClose, catalog = null, onSelect
           </div>
         </div>
 
-        {/* Tables List */}
+        {/* Tables List or Offline Notice */}
         <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
-          <div className="text-[11px] font-mono text-[#5f6368] uppercase mb-1">
-            Tables ({catalog.tables ? catalog.tables.length : 0})
-          </div>
+          {isOffline ? (
+            <div className="p-4 rounded-xl bg-[#2a1315] border border-[#5c1d24] text-xs text-[#fca5a5] space-y-3">
+              <div className="flex items-center gap-2 font-semibold text-white">
+                <AlertCircle className="w-4 h-4 text-red-400" />
+                <span>Database Offline or Connection Failed</span>
+              </div>
+              <p className="font-mono text-[11px] text-red-300 leading-relaxed wrap-break-word bg-[#1f0e10] p-2.5 rounded-lg border border-red-950">
+                {catalog.error || "Could not connect to database host."}
+              </p>
+              <div className="flex items-center gap-2 pt-1">
+                {onReconnect && (
+                  <button
+                    type="button"
+                    onClick={() => onReconnect(catalog.id)}
+                    disabled={reconnectingId === catalog.id}
+                    className="px-3 py-1.5 rounded-lg bg-red-800/80 hover:bg-red-700 text-white font-medium text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    {reconnectingId === catalog.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    )}
+                    <span>{reconnectingId === catalog.id ? "Connecting..." : "Retry Connection"}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="text-[11px] font-mono text-[#5f6368] uppercase mb-1">
+                Tables ({catalog.tables ? catalog.tables.length : 0})
+              </div>
 
           {catalog.tables && catalog.tables.map((table) => {
             const isExpanded = !!expandedTables[table.name];
@@ -144,6 +188,8 @@ export default function SchemaDrawer({ isOpen, onClose, catalog = null, onSelect
               </div>
             );
           })}
+          </>
+          )}
         </div>
 
         <div className="p-2.5 bg-[#1b1c1e] border-t border-[#2e2f32] text-[11px] text-[#5f6368] font-mono text-center select-none">
